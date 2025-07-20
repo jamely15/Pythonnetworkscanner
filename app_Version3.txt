@@ -1,0 +1,155 @@
+import nmap
+import mysql.connector
+from mysql.connector import Error
+from datetime import datetime
+import time
+
+# Function to validate an IP address
+def validate_ip(ip):
+    parts = ip.split(".")
+    return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+
+# Function to validate a port range
+def validate_port_range(port_range):
+    try:
+        start, end = map(int, port_range.split("-"))
+        return 1 <= start <= 65535 and 1 <= end <= 65535 and start <= end
+    except ValueError:
+        return False
+
+# Function to get user input for the target network, port range
+def get_scan_details():
+    while True:
+        target_network = input("Enter target network (CIDR notation, e.g., 192.168.1.0/24): ")
+        if validate_ip(target_network.split('/')[0]):
+            break
+        print("Invalid network format. Please try again.")
+
+    while True:
+        port_range = input("Enter port range to scan (default: 1-65535): ") or "1-65535"
+        if validate_port_range(port_range):
+            break
+        print("Invalid port range format. Please use the format 'start-end', e.g., '22-80'.")
+
+    return target_network, port_range
+
+# Function to connect to MySQL and create a table if it doesn't exist
+def initialize_database(host, user, password, database):
+    try:
+        # Connect to MySQL
+        connection = mysql.connector.connect(
+            host=host,
+            user=user,
+            password=password,
+            database=database
+        )
+
+        if connection.is_connected():
+            cursor = connection.cursor()
+
+            # SQL query to create a table (if it does not exist)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scan_results (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    target_ip VARCHAR(255),
+                    port INT,
+                    protocol VARCHAR(10),
+                    state VARCHAR(10),
+                    service VARCHAR(255),
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            connection.commit()
+            print("Database and table initialized successfully.")
+        return connection
+    except Error as e:
+        print(f"Error connecting to MySQL: {e}")
+        return None
+
+# Function to save scan results into the database
+def save_to_database(connection, target_ip, scan_results, scanner):
+    try:
+        cursor = connection.cursor()
+
+        for host in scan_results:
+            for proto in scanner[host].all_protocols():
+                ports = sorted(scanner[host][proto].keys())
+
+                for port in ports:
+                    state = scanner[host][proto][port]['state']
+                    service = scanner[host][proto][port].get('name', 'unknown service')
+
+                    cursor.execute("""
+                        INSERT INTO scan_results (target_ip, port, protocol, state, service)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (host, port, proto, state, service))
+
+        connection.commit()
+        print("Scan results saved to the database.")
+    except Error as e:
+        print(f"Error saving results to MySQL: {e}")
+
+# Function to fetch and display all scan results from the database
+def display_database(connection):
+    try:
+        cursor = connection.cursor()
+
+        cursor.execute("SELECT * FROM scan_results ORDER BY timestamp DESC")
+        rows = cursor.fetchall()
+
+        # Display the data in a nice format
+        print("\nScan Results:")
+        print("ID | Target IP       | Port | Protocol | State  | Service           | Timestamp")
+        print("---------------------------------------------------------------------------------")
+        for row in rows:
+            print(f"{row[0]:<2} | {row[1]:<15} | {row[2]:<4} | {row[3]:<8} | {row[4]:<6} | {row[5]:<17} | {row[6]}")
+    except Error as e:
+        print(f"Error fetching results from MySQL: {e}")
+
+# Main function to run the Nmap scan
+def main():
+    # Database connection details
+    db_host = 'localhost'
+    db_user = 'your_username'  # Replace with your MySQL username
+    db_password = 'your_password'  # Replace with your MySQL password
+    db_name = 'your_database'  # Replace with your MySQL database name
+
+    # Initialize the database
+    connection = initialize_database(db_host, db_user, db_password, db_name)
+    if connection is None:
+        return
+
+    # Get scan details from the user
+    target_network, port_range = get_scan_details()
+
+    # Initialize Nmap scanner
+    scanner = nmap.PortScanner()
+
+    # Run scan on the network
+    print(f"Starting scan on {target_network} for ports {port_range}...")
+    network = target_network
+    scan_results = {}
+
+    import ipaddress
+    net = ipaddress.ip_network(network, strict=False)
+    for ip in net.hosts():
+        try:
+            scanner.scan(str(ip), port_range, arguments="-sS -T4 -Pn --max-retries 2 --host-timeout 30s")
+            if scanner.has_host(str(ip)):
+                scan_results[str(ip)] = scanner[str(ip)]
+        except Exception as ip_error:
+            print(f"Error scanning {ip}: {ip_error}")
+
+    # Save results to database
+    save_to_database(connection, network, scan_results, scanner)
+
+    # Optionally display results
+    display = input("Display all scan results from database? (y/n): ").strip().lower()
+    if display == 'y':
+        display_database(connection)
+
+    connection.close()
+
+if __name__ == "__main__":
+    main()
