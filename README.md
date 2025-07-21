@@ -117,6 +117,4 @@ Pull requests and issues are welcome! Please open a discussion for feature reque
 
 ---
 
-## License
-
-MIT License (see `LICENSE` file if provided).
+**This repository is for educational purposes only.**
